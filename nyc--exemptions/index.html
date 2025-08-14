@@ -1,0 +1,794 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy"
+      content="default-src 'self' https://data.cityofnewyork.us https://cdn.jsdelivr.net;
+               style-src   'self' 'unsafe-inline' https://cdn.jsdelivr.net;
+               script-src  'self' 'unsafe-inline';
+               img-src     'self' data:;
+			   font-src    'self' https://cdn.jsdelivr.net data:;
+               connect-src https://data.cityofnewyork.us;
+               base-uri    'self';
+               form-action 'self'">
+  <title>NYC Property Exemption Lookup</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css" />
+  <style>
+    body { font-family: sans-serif; padding: 20px; max-width: 900px; margin: auto; }
+    label { display: block; margin-top: 12px; }
+    input, select, button { width: 100%; max-width: 250px; padding: 6px; margin-top: 5px; font-size: 16px; }
+    button.download { max-width: none; margin-top: 10px; }
+    table { width: 100%; border-collapse: collapse; margin-top: 25px; word-break: break-word; }
+    th, td { border: 1px solid #ccc; padding: 8px; text-align: left; }
+    th { background-color: #f2f2f2; }
+    #summary { margin-top: 20px; font-weight: bold; }
+    #year-nav { margin-top: 20px; display: flex; flex-wrap: wrap; gap: 6px; }
+    #loadingOverlay {
+      position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
+      background: rgba(255,255,255,0.8); z-index: 9999;
+      display: flex; flex-direction: column; justify-content: center; align-items: center;
+      font-size: 1.25rem;
+    }
+    @media (max-width: 600px) { input, select, button { width: 100%; } }
+    @media print { .d-print-none { display: none !important; } }
+  </style>
+
+  <!-- App Token + auto-inject into Socrata requests -->
+	<script>
+	  // Public token for read-only datasets. Safe to embed.
+	  const APP_TOKEN = "fbbsJ6S1wwtWafNbQAEpKqMTX";
+
+	  // Simple global for diagnostics
+	  window.API_DIAG = {
+		tokenPresent: !!APP_TOKEN,
+		origin: location.origin,
+		last: null
+	  };
+
+	  (function patchFetchForSocrata(){
+		const SOC_HOST = "data.cityofnewyork.us";
+		const nativeFetch = window.fetch;
+
+		window.fetch = function(input, init = {}){
+		  let url = "";
+		  try { url = typeof input === "string" ? input : input.url; } catch {}
+		  let retries = 0, rateLimited = false;
+
+		  // Inject token header for Socrata calls
+		  try {
+			const u = new URL(url, location.origin);
+			if (u.hostname.endsWith(SOC_HOST) && APP_TOKEN) {
+			  const headers = new Headers((init && init.headers) || {});
+			  if (!headers.has("X-App-Token")) headers.set("X-App-Token", APP_TOKEN);
+			  init = { ...init, headers };
+			}
+		  } catch(e) { /* ignore */ }
+
+		  return nativeFetch(input, init).then(async res => {
+			if (res.status !== 429) return record(res);
+			// simple backoff for 429s
+			rateLimited = true;
+			let retryRes = res;
+			while (retryRes.status === 429 && retries < 3){
+			  const ra = parseInt(retryRes.headers.get("Retry-After") || "2", 10);
+			  const waitMs = Math.max(ra * 1000, 1000 * (2 ** retries));
+			  await new Promise(r => setTimeout(r, waitMs));
+			  retryRes = await nativeFetch(input, init);
+			  retries++;
+			}
+			return record(retryRes);
+
+			function record(finalRes){
+			  // Save diagnostics snapshot
+			  window.API_DIAG.last = {
+				url, status: finalRes.status,
+				tokenSent: !!APP_TOKEN,
+				retries, rateLimited,
+				time: new Date().toISOString()
+			  };
+			  // Inform listeners (diagnostics panel)
+			  window.dispatchEvent(new CustomEvent("soda:request", { detail: window.API_DIAG.last }));
+			  return finalRes;
+			}
+		  });
+		};
+	  })();
+	</script>
+</head>
+<body>
+	<div class="d-flex justify-content-between align-items-start mb-3">
+	  <h1 class="me-3">NYC Property Exemption Lookup Tool</h1>
+	  <div id="share-banner" class="alert alert-success py-1 px-2 d-none d-print-none small" role="alert" style="white-space: nowrap;"></div>
+	</div>
+	
+	<div id="input-form">
+	  <h3 class="me-3"><br>Search By Borough, Block and Lot</h3>
+	  <form class="mb-4">
+		<!-- BBL-based search -->
+		<div class="row g-3 align-items-end">
+		  <div class="col-md-4">
+			<label for="borough" class="form-label">Borough</label>
+			<select id="borough" class="form-select">
+			  <option value="">-- Select Borough --</option>
+			  <option value="1">1 - Manhattan</option>
+			  <option value="2">2 - Bronx</option>
+			  <option value="3">3 - Brooklyn</option>
+			  <option value="4">4 - Queens</option>
+			  <option value="5">5 - Staten Island</option>
+			</select>
+		  </div>
+		  <div class="col-md-3">
+			<label for="block" class="form-label">Block</label>
+			<input type="text" id="block" class="form-control" placeholder="e.g. 5777" />
+		  </div>
+		  <div class="col-md-3">
+			<label for="lot" class="form-label">Lot</label>
+			<input type="text" id="lot" class="form-control" placeholder="e.g. 1020" />
+		  </div>
+		  <div class="col-md-2 d-grid">
+			<button type="button" id="searchBBL" class="btn btn-secondary">Search</button>
+		  </div>
+		  <br>&nbsp;
+		</div>
+
+		<hr class="my-4" />
+		
+		<h3 class="me-3"><br>Search By 10 Digit Parcel ID (BBL)</h3>
+		<!-- Direct Parcel ID search -->
+		<div class="row g-3 align-items-end">
+		  <div class="col-md-10">
+			<label for="parid" class="form-label">Parcel ID</label>
+			<input type="text" id="parid" class="form-control" placeholder="e.g. 2057771020" />
+		  </div>
+		  <div class="col-md-2 d-grid">
+			<button type="button" id="searchParid" class="btn btn-secondary">Search</button>
+		  </div>
+		</div>
+	  </form>
+	</div>
+	
+<!-- Action buttons for CSV, Share, Print, Reset -->
+<div id="action-buttons" class="mb-3 d-none d-print-none">
+  <div class="d-flex flex-wrap flex-md-nowrap gap-2 align-items-start">
+    <button class="btn btn-secondary" onclick="resetForm()">
+      <i class="bi bi-arrow-left-circle me-1"></i> New Search
+    </button>
+    <button class="btn btn-success" id="downloadCsv">
+      <i class="bi bi-file-earmark-arrow-down me-1"></i> Download CSV*
+    </button>
+    <button class="btn btn-outline-secondary" id="share">
+      <i class="bi bi-link-45deg me-1"></i> Copy Shareable Link
+    </button>
+    <button class="btn btn-outline-primary" onclick="window.print()">
+      <i class="bi bi-printer me-1"></i> Print
+    </button>
+  </div>
+</div>
+
+<!-- Property details (PLUTO) -->
+<div id="property-details" class="mb-4"></div>
+
+<!-- Summary of results -->
+<div id="summary"></div>
+
+<!-- Year selector navigation -->
+<div id="year-nav" class="d-print-none"></div>
+
+<!-- Results table -->
+<div id="results"></div>
+
+<!-- Link to report (for print) -->
+<div id="print-share-link" class="d-none d-print-block mt-4">
+	<h5>Link to Most Recent Report For This Property:</h5>
+	<p class="small text-muted">
+	  <a id="print-url" href="#" target="_blank" style="word-break: break-all;"></a>
+	</p>
+</div>
+
+<!-- Disclaimer and Data Source Attribution -->
+<div id="disclaimer-sources">  
+  <hr class="my-4">
+  <h5>Data Disclaimer & Sources</h5>
+  <p class="small text-muted">
+    The information presented in this report is sourced directly from the 
+	<a href="https://data.cityofnewyork.us/resource/64uk-42ks" target="_blank">
+	Primary Land Use Tax Lot Output (PLUTO)</a>, the NYC
+    <a href="https://data.cityofnewyork.us/Housing-Development-and-Preservation/Property-Exemptions/muvi-b6kx" target="_blank">
+	NYC Department of Housing Preservation & Development (HPD)</a>, and 
+    <a href="https://data.cityofnewyork.us/Housing-Development-and-Preservation/Exemption-Code-Lookup/myn9-hwsy" target="_blank">
+    NYC Open Data</a> 
+    portals. These datasets reflect HPD-administered tax exemptions and related benefits granted to eligible properties.
+  </p>
+  <p class="small text-muted">
+    The dataset used for this tool begins with assessment year <strong>2021</strong>. Records prior to this year are not included and may not be available through the current public data feed.
+  </p>
+  <p class="small text-muted">
+    While this tool provides a convenient interface to explore HPD exemption data, users are encouraged to verify property-specific details directly with the 
+    <a href="https://www.nyc.gov/html/hpd/html/home/home.shtml" target="_blank">
+      NYC Department of Housing Preservation & Development
+    </a> 
+    or consult a qualified real estate professional for investment, compliance, or legal decisions.
+  </p>
+  <p class="small text-muted">
+    We make no representations or warranties, expressed or implied, as to the accuracy of this information. References to square footage, age or any other metrics are approximate. 
+    You bear all risk for any reliance you place on this information. In no event will we be liable for any loss or damage including without limitation, indirect or consequential loss 
+    or damage arising out of, or in connection with your use of, or inability to use, this website. Through this website you are able to link to other websites which are not under the 
+    control of team.lalacre.com. We do not necessarily recommend or endorse the views expressed within them, and we have no control over their content. This website is controlled and 
+    operated by teamlalacre.com. We work hard and continuously to keep the website up and running without a glitch. However, due to technical issues within or beyond our control 
+    sometimes the site will be down or not working properly. Let us know and we will do our best to resolve any problems. Thank you for visiting our site.
+  </p>
+</div>
+
+<!-- Full screen loading overlay -->
+<div id="loadingOverlay" class="d-none">
+  <div class="spinner-border text-primary" role="status" style="width: 3rem; height: 3rem;"></div>
+  <div class="mt-2">Loading…</div>
+</div>
+
+<!-- Diagnostics (toggleable) -->
+		<div id="diag" class="d-print-none" style="display:none; margin-top:16px;">
+
+		  <!-- Diagnostics card -->
+		  <div class="card border-secondary mb-3">
+			<div class="card-header py-2">Diagnostics</div>
+			<div class="card-body small font-monospace lh-sm"">
+			  <div><strong>Origin:</strong> <span id="d-origin"></span></div>
+			  <div><strong>Token present:</strong> <span id="d-token"></span></div>
+			  <div><strong>Last URL:</strong> <span id="d-url" style="overflow-wrap:anywhere;"></span></div>
+			  <div><strong>Status:</strong> <span id="d-status"></span></div>
+			  <div><strong>429 backoff used:</strong> <span id="d-rl"></span></div>
+			  <div><strong>Retries:</strong> <span id="d-retries"></span></div>
+			  <div><strong>Time:</strong> <span id="d-time"></span></div>
+			</div>
+		  </div>
+
+		  <!-- Sources card -->
+		  <div class="card border-secondary mb-3">
+			<div class="card-header py-2">Source Links</div>
+			<div class="card-body small font-monospace lh-sm"">
+			  <pre id="d-csv-header"
+				   style="white-space:pre-wrap; overflow-wrap:anywhere;">!!! Run a search to see sources.</pre>
+			</div>
+		  </div>
+
+		</div>
+		
+		<!-- Toggle button (unchanged) -->
+		<div class="d-print-none" style="margin-top:8px;">
+		  <button id="toggleDiag" class="btn btn-sm btn-outline-secondary">Show Diagnostics &amp; Sources</button>
+		</div>
+
+		<script>
+		  // Wire up diagnostics UI
+		  (function(){
+			const el = id => document.getElementById(id);
+			const $panel = el('diag'), $btn = el('toggleDiag');
+
+			// Initialize static bits
+			el('d-origin').textContent = window.API_DIAG.origin;
+			el('d-token').textContent = window.API_DIAG.tokenPresent ? 'Yes' : 'No';
+
+			// Toggle button
+			$btn.addEventListener('click', () => {
+			  const visible = $panel.style.display !== 'none';
+			  $panel.style.display = visible ? 'none' : 'block';
+			  $btn.textContent = visible ? 'Show Diagnostics & Sources' : 'Hide Diagnostics & Sources';
+			});
+
+			// Update on every Socrata request completion
+			window.addEventListener('soda:request', (ev) => {
+			  const d = ev.detail;
+			  el('d-url').textContent = d.url || '';
+			  el('d-status').textContent = String(d.status);
+			  el('d-rl').textContent = d.rateLimited ? 'Yes' : 'No';
+			  el('d-retries').textContent = String(d.retries);
+			  el('d-time').textContent = d.time;
+			});
+		  })();
+
+		  // Build the exact header text shown in your CSV
+		  function buildCsvHeaderPreview(parid) {
+			const EXEMPTIONS_BASE = 'https://data.cityofnewyork.us/resource/muvi-b6kx';
+			const CODELOOKUP_JSON = 'https://data.cityofnewyork.us/resource/myn9-hwsy.json';
+			const PLUTO_BASE      = 'https://data.cityofnewyork.us/resource/64uk-42ks';
+
+			const EXEMPTIONS_JSON_FILTERED = `${EXEMPTIONS_BASE}.json?parid=${encodeURIComponent(parid)}`;
+			const PLUTO_JSON_FILTERED      = `${PLUTO_BASE}.json?bbl=${encodeURIComponent(parid)}`;
+
+			const nowIso = new Date().toISOString();
+
+			return [
+			  'Compiled by TeamLalaCRE',
+			  'https://teamlalacre.com/abatements-exemptions',
+			  '',
+			  '- NYC Open Data Sources (official JSON):',
+			  '      Exemptions --- https://data.cityofnewyork.us/resource/muvi-b6kx',
+			  '      Exemption Code Lookup --- https://data.cityofnewyork.us/resource/myn9-hwsy.json',
+			  '      PLUTO --- https://data.cityofnewyork.us/resource/64uk-42ks',
+			  '',
+			  '- Sources Filtered By BBL (official JSON):',
+			  `      Exemptions --- ${EXEMPTIONS_JSON_FILTERED}`,
+			  `      PLUTO --- ${PLUTO_JSON_FILTERED}`,
+			].join('\n');
+		  }
+
+		  function updateDiagCsvHeader(parid) {
+			const el = document.getElementById('d-csv-header');
+			if (!el) return;
+			if (!parid || parid.length !== 10) {
+			  el.textContent = '!!! Run a search to see sources.';
+			  return;
+			}
+			el.textContent = buildCsvHeaderPreview(parid);
+		  }
+
+		  // Refresh the preview whenever a Socrata request finishes (keeps timestamp fresh)
+		  window.addEventListener('soda:request', () => {
+			const p = (window.currentParid || document.getElementById('parid').value || '').trim();
+			updateDiagCsvHeader(p);
+		  });
+		</script>
+
+
+<script>
+  const apiUrl = 'https://data.cityofnewyork.us/resource/muvi-b6kx.json';
+  const codeLookupUrl = 'https://data.cityofnewyork.us/resource/myn9-hwsy.json?$limit=1000';
+  const schemaUrl = 'https://data.cityofnewyork.us/api/views/muvi-b6kx/columns.json';
+
+  let exemptionLookup = {};
+  let fieldDescriptions = {};
+  let yearWithData = {};
+  let cachedData = [];
+  let currentParid = ''; 
+  let currentYear = new Date().getFullYear() + 1;
+  const minYear = 2021;
+
+  // Show full-page loading overlay
+  function showLoading() {
+    document.getElementById('loadingOverlay').classList.remove('d-none');
+  }
+
+  // Hide loading overlay with slight delay
+  async function hideLoading() {
+    await new Promise(r => setTimeout(r, 150));
+    document.getElementById('loadingOverlay').classList.add('d-none');
+  }
+
+  // --- Lookups
+  async function loadLookup() {
+    const res = await fetch(codeLookupUrl);
+    const arr = await res.json();
+    arr.forEach(r => {
+      exemptionLookup[r.exempt_code] = r.description;
+      exemptionLookup[r.column_id] = r.long_description;
+    });
+  }
+
+  async function loadSchema() {
+    const res = await fetch(schemaUrl);
+    if (res.ok) {
+      const data = await res.json();
+      data.forEach(col => {
+        if (col.fieldName && col.description) {
+          fieldDescriptions[col.fieldName] = col.description;
+        }
+      });
+    }
+  }
+
+  async function ensureLookups() {
+    if (!Object.keys(exemptionLookup).length) await loadLookup();
+    if (!Object.keys(fieldDescriptions).length) await loadSchema();
+  }
+
+  // Construct 10-digit Parcel ID from BBL
+  function constructParid(boro, block, lot) {
+    return `${boro.padStart(1, '0')}${block.padStart(5, '0')}${lot.padStart(4, '0')}`;
+  }
+
+  // Event: Search using BBL fields (converted to parid)
+  document.getElementById('searchBBL').addEventListener('click', async () => {
+    const boro = document.getElementById('borough').value;
+    const block = document.getElementById('block').value.trim();
+    const lot = document.getElementById('lot').value.trim();
+
+    if (!boro || !block || !lot) return alert('Missing BBL');
+
+    const parid = constructParid(boro, block, lot);
+    currentParid = parid;
+	document.getElementById('parid').value = parid;   
+    updateDiagCsvHeader(parid);
+
+    showLoading();
+    try {
+      currentYear = new Date().getFullYear() + 1;
+      await ensureLookups();
+      updateURLParams({ parid });
+      await checkYearDataAvailability(parid);
+      await lookupAllYears({ parid });
+      document.getElementById('input-form').style.display = 'none';
+      document.getElementById('action-buttons').classList.remove('d-none');
+    } finally {
+      hideLoading();
+    }
+  });
+
+  // Event: Search using typed Parcel ID
+  document.getElementById('searchParid').addEventListener('click', async () => {
+    const parid = document.getElementById('parid').value.trim();
+    currentParid = parid;
+    if (!parid || parid.length !== 10) return alert('Please enter a valid 10-digit Parcel ID.');
+	document.getElementById('parid').value = parid;
+    updateDiagCsvHeader(parid);   
+
+    showLoading();
+    try {
+      currentYear = new Date().getFullYear() + 1;
+      await ensureLookups();
+      updateURLParams({ parid });
+      await checkYearDataAvailability(parid);
+      await lookupAllYears({ parid });
+      document.getElementById('input-form').style.display = 'none';
+      document.getElementById('action-buttons').classList.remove('d-none');
+    } finally {
+      hideLoading();
+    }
+  });
+
+  // Check which years have data (used for jump menu and ✔️ indicators)
+  async function checkYearDataAvailability(parid) {
+    yearWithData = {};
+    for (let y = currentYear; y >= minYear; y--) {
+      const query = `${apiUrl}?$where=year='${y}' AND parid='${parid}'&$limit=1`;
+      const res = await fetch(query);
+      if (res.ok) {
+        const d = await res.json();
+        yearWithData[y] = d.length > 0;
+        await new Promise(res => setTimeout(res, 75));
+      }
+    }
+  }
+
+  // Lookup all data across available years
+  async function lookupAllYears({ parid }) {
+    const query = `${apiUrl}?$where=parid='${parid}'&$limit=5000`;
+    const res = await fetch(query);
+    cachedData = res.ok ? await res.json() : [];
+
+    // Mark available years for ✔️ indicators
+    yearWithData = {};
+    cachedData.forEach(row => {
+      if (row.year) yearWithData[row.year] = true;
+    });
+
+    renderYearButtons('all');
+
+    if (!cachedData.length) {
+      document.getElementById('summary').innerText = 'No exemption records found for any year.';
+      document.getElementById('results').innerHTML = '';
+    } else {
+      renderData(cachedData, 'All Years');
+      document.getElementById('action-buttons').classList.remove('d-none');
+    }
+    await loadPlutoData(parid);
+  }
+
+  // Fetch data for a single selected year
+  async function lookupYear(year) {
+    const parid = document.getElementById('parid').value.trim();
+    if (!parid) return alert('Missing Parcel ID');
+
+    const data = cachedData.filter(row => String(row.year) === String(year));
+
+    currentYear = year;
+    renderYearButtons(year);
+
+    if (!data.length) {
+      document.getElementById('summary').innerText = `No exemption records found for ${year}.`;
+      document.getElementById('results').innerHTML = '';
+    } else {
+      renderData(data, year);
+      document.getElementById('action-buttons').classList.remove('d-none');
+    }
+  }
+
+  // Pull PLUTO details
+async function loadPlutoData(parid) {
+  // break out parts
+  const boroCode = parid?.charAt(0);
+  const blockStr = parid?.slice(1, 6);
+  const lotStr   = parid?.slice(6);
+  const blockNum = Number(blockStr);
+  const lotNum   = Number(lotStr);
+
+  // map 1–5 → borough codes used in many PLUTO releases
+  const BORO_ABBR = { "1":"MN", "2":"BX", "3":"BK", "4":"QN", "5":"SI" };
+
+  // Try #1: numeric bbl comparison (most reliable across vintages)
+  let url = `https://data.cityofnewyork.us/resource/64uk-42ks.json?$where=bbl=${Number(parid)}&$limit=1`;
+  let res = await fetch(url);
+  let rows = res.ok ? await res.json() : [];
+
+  // Try #2: block + lot (and optional boro/borough) if #1 returned nothing
+  if (!rows || rows.length === 0) {
+    // Some vintages use numeric block/lot; "borough" is text (MN/BX/BK/QN/SI).
+    const boroughAbbr = BORO_ABBR[boroCode] || "";
+    // Prefer borough text if present; otherwise just rely on block+lot uniqueness (rare collisions).
+    const whereParts = [
+      Number.isFinite(blockNum) ? `block=${blockNum}` : null,
+      Number.isFinite(lotNum)   ? `lot=${lotNum}`     : null,
+      boroughAbbr ? `borough='${boroughAbbr}'` : null
+    ].filter(Boolean).join(" AND ");
+
+    url = `https://data.cityofnewyork.us/resource/64uk-42ks.json?$where=${encodeURIComponent(whereParts)}&$limit=1`;
+    res = await fetch(url);
+    rows = res.ok ? await res.json() : [];
+  }
+
+  if (!rows || rows.length === 0) {
+    // Show a small note so you know which query failed
+    document.getElementById('property-details').innerHTML = `<div class="small text-muted">PLUTO data not found for BBL ${parid}.</div>`;
+    console.warn("PLUTO lookup returned no rows. Last URL tried:", url);
+    return;
+  }
+
+  const d = rows[0];
+
+  // helpers
+  const n = v => (v == null || v === '') ? 'N/A' : v;
+  const num = v => (v == null || v === '' ? 'N/A' : Number(v).toLocaleString());
+  const yes = v => v ? 'Yes' : 'No';
+
+  // Zoning clusters
+  const z  = [d.zonedist1, d.zonedist2, d.zonedist3, d.zonedist4].filter(Boolean).join(', ');
+  const ov = [d.overlay1,  d.overlay2].filter(Boolean).join(', ');
+  const sp = [d.spdist1,   d.spdist2,  d.spdist3].filter(Boolean).join(', ');
+
+  const zola = `https://zola.planning.nyc.gov/bbl/${parid}`;
+
+  const html = `
+    <h5 class="mb-2">Property Details (PLUTO)</h5>
+    <div class="row row-cols-1 row-cols-md-2 g-2 small">
+      <div><strong>Address:</strong> ${n(d.address)}</div>
+      <div><strong>BBL:</strong> ${parid}
+           <span class="text-muted"> (Boro ${boroCode} • Block ${n(d.block)} • Lot ${n(d.lot)})</span></div>
+
+      <div><strong>Bldg Class:</strong> ${n(d.bldgclass)}</div>
+      <div><strong>Land Use:</strong> ${n(d.landuse)}</div>
+
+      <div><strong>Lot Area:</strong> ${num(d.lotarea)} sq ft</div>
+      <div><strong>Building Area:</strong> ${num(d.bldgarea)} sq ft</div>
+
+      <div><strong>Total Units:</strong> ${n(d.unitstotal)}</div>
+      <div><strong>Floors:</strong> ${n(d.numfloors)}</div>
+
+      <div><strong>Year Built:</strong> ${n(d.yearbuilt)}</div>
+      <div><strong>Corner Lot:</strong> ${yes(d.cornerlot === 'Y')}</div>
+
+      ${z  ? `<div><strong>Zoning District(s):</strong> ${z}</div>` : ''}
+      ${ov ? `<div><strong>Overlay(s):</strong> ${ov}</div>` : ''}
+      ${sp ? `<div><strong>Special District(s):</strong> ${sp}</div>` : ''}
+      <div><a href="${zola}" target="_blank" rel="noopener">Open in ZOLA</a></div>
+    </div>
+  `;
+
+  document.getElementById('property-details').innerHTML = html;
+}
+
+
+  // Year selector dropdown + ✔️ indicators
+  function renderYearButtons(selectedYear) {
+    let html = 'Jump to year: <select id="yearSelect">';
+    html += `<option value="all"${selectedYear === 'all' ? ' selected' : ''}>All Years</option>`;
+
+    for (let y = currentYear; y >= minYear; y--) {
+      const hasData = yearWithData[y];
+      html += `<option value="${y}" ${selectedYear === y ? 'selected' : ''}>${y}${hasData ? ' ✔️' : ''}</option>`;
+    }
+
+    html += '</select>';
+    document.getElementById('year-nav').innerHTML = html;
+
+    document.getElementById('yearSelect').addEventListener('change', async (e) => {
+      const value = e.target.value;
+      if (value === 'all') {
+        const parid = document.getElementById('parid').value.trim();
+        if (!parid) return alert('Missing Parcel ID');
+        await lookupAllYears({ parid });
+      } else {
+        await lookupYear(parseInt(value, 10));
+      }
+    });
+  }
+
+  function renderData(data, year) {
+    data.sort((a, b) => {
+      const yearDiff = Number(b.year || 0) - Number(a.year || 0);
+      if (yearDiff !== 0) return yearDiff;
+      return Number(b.period || 0) - Number(a.period || 0);
+    });
+
+    const yearText = year === 'All Years'
+      ? `${minYear} – ${new Date().getFullYear() + 1}`
+      : year;
+    const plural = year === 'All Years' ? 'years' : 'year';
+
+    const now = new Date();
+    const timestamp = now.toLocaleString(undefined, {
+      year: 'numeric', month: 'long', day: 'numeric',
+      hour: 'numeric', minute: '2-digit', hour12: true
+    });
+
+    document.getElementById('summary').innerHTML = `
+      <strong>Found ${data.length} record(s) for assessment ${plural} ${yearText}.</strong><br>
+      <p class="small text-muted">Searched on ${timestamp}</p>
+      <p class="small text-muted d-print-none">*CSV export includes all exemption records across available years. Columns include both raw data fields and readable&nbsp;headers.</p>
+    `;
+
+    const fields = ['year', 'period', 'baseyr', 'benftstart', 'no_years', 'exmp_code'];
+    const headers = ['Tax Year', 'Period', 'Base Year', 'Benefit Start', '# Of Years', 'Exemption Type'];
+
+    const headerCells = headers.map(h => `<th>${h}</th>`).join('');
+	let html = `<table><thead><tr>${headerCells}</tr></thead><tbody>`;
+
+    data.forEach(row => {
+      html += '<tr>' + fields.map(f => {
+        let val = row[f] || '';
+
+        if (f === 'exmp_code') {
+          const code = String(row[f] || '');
+          const desc = exemptionLookup[code];
+          val = code;
+          if (desc) val += ` – ${desc}`;
+        }
+
+        if (f === 'period') {
+          const disp = val === '1' ? '1 – Tentative' : val === '3' ? '3 – Final' : val;
+          const color = val === '1' ? 'orange' : val === '3' ? 'green' : 'inherit';
+          return `<td style="color:${color}; font-weight:bold">${disp}</td>`;
+        }
+
+        return `<td>${val}</td>`;
+      }).join('') + '</tr>';
+    });
+
+    html += '</tbody></table>';
+    document.getElementById('results').innerHTML = html;
+
+    // Copy link
+    document.getElementById('share').addEventListener('click', () => {
+      navigator.clipboard.writeText(location.href).then(() => {
+        const statusBox = document.getElementById('share-banner');
+        statusBox.textContent = 'Link copied!';
+        statusBox.classList.remove('d-none');
+        setTimeout(() => {
+          statusBox.classList.add('d-none');
+          statusBox.textContent = '';
+        }, 3000);
+      }).catch(() => {
+        const statusBox = document.getElementById('share-banner');
+        statusBox.textContent = 'Failed to copy';
+        statusBox.classList.remove('d-none');
+        statusBox.classList.replace('alert-success', 'alert-danger');
+        setTimeout(() => {
+          statusBox.classList.add('d-none');
+          statusBox.textContent = '';
+          statusBox.classList.replace('alert-danger', 'alert-success');
+        }, 3000);
+      });
+    });
+
+    document.getElementById('print-url').textContent = location.href;
+  }
+
+// CSV Download (EXACT header as screenshot)
+document.getElementById('downloadCsv').addEventListener('click', async () => {
+  const parid = currentParid; // 10-digit BBL/parid
+  const now = new Date();
+  if (!parid || parid.length !== 10) return alert('Missing or invalid Parcel ID');
+
+  // Base dataset endpoints (match screenshot)
+  const EXEMPTIONS_BASE = 'https://data.cityofnewyork.us/resource/muvi-b6kx';
+  const CODELOOKUP_JSON = 'https://data.cityofnewyork.us/resource/myn9-hwsy.json';
+  const PLUTO_BASE      = 'https://data.cityofnewyork.us/resource/64uk-42ks';
+
+  // Filtered JSON endpoints (match screenshot)
+  const EXEMPTIONS_JSON_FILTERED = `${EXEMPTIONS_BASE}.json?parid=${encodeURIComponent(parid)}`;
+  const PLUTO_JSON_FILTERED      = `${PLUTO_BASE}.json?bbl=${encodeURIComponent(parid)}`;
+
+  // Gather all rows across years (unchanged)
+  let allRows = [];
+  for (let y = new Date().getFullYear() + 1; y >= minYear; y--) {
+    const resp = await fetch(`${apiUrl}?$where=year='${y}' AND parid='${parid}'&$limit=1000`);
+    if (resp.ok) {
+      const rows = await resp.json();
+      allRows = allRows.concat(rows);
+      await new Promise(res => setTimeout(res, 100));
+    }
+  }
+  if (!allRows.length) return alert('No data to export');
+
+  // Columns
+  const fieldNames = [...new Set(allRows.flatMap(r => Object.keys(r)))];
+  const escapeCsv = s => `"${String(s).replace(/"/g, '""')}"`;
+  const rawHeaders   = fieldNames.map(f => escapeCsv(f));
+  const humanHeaders = fieldNames.map(f =>
+    escapeCsv(fieldDescriptions[f] || f.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase()))
+  );
+
+	  // ----- Header EXACTLY as in the screenshot -----
+	  let csv = [
+		'Compiled by TeamLalaCRE',
+		'https://teamlalacre.com/abatements-exemptions',
+		'',
+		'- NYC Open Data Sources (official JSON):',
+		'      Exemptions --- https://data.cityofnewyork.us/resource/muvi-b6kx',
+		'      Exemption Code Lookup --- https://data.cityofnewyork.us/resource/myn9-hwsy.json',
+		'      PLUTO --- https://data.cityofnewyork.us/resource/64uk-42ks',
+		'',
+		'- Sources Filtered By BBL (official JSON):',
+		`      Exemptions --- ${EXEMPTIONS_JSON_FILTERED}`,
+		`      PLUTO --- ${PLUTO_JSON_FILTERED}`,
+		'',
+		`- Downloaded: ${now.toISOString()}`,
+		'',
+		rawHeaders.join(','),      // raw field names
+		humanHeaders.join(','),    // human-friendly headers
+		''
+	  ].join('\n');
+
+	  // Rows
+	  for (const row of allRows) {
+		const rowData = fieldNames.map(f => escapeCsv(row[f] ?? ''));
+		csv += '\n' + rowData.join(',');
+	  }
+
+	  // Download
+	  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+	  const url = URL.createObjectURL(blob);
+	  const a = document.createElement('a');
+	  a.href = url;
+	  const timestamp = now.toISOString().replace(/[:\-T]/g, '').slice(0, 15);
+	  a.download = `exemption_data_${parid}_${timestamp}.csv`;
+	  a.click();
+	});
+
+		  function updateURLParams({ parid }) {
+			const params = new URLSearchParams();
+			if (parid) params.set('parid', parid);
+			history.replaceState({}, '', `${location.pathname}?${params}`);
+		  }
+
+		  // On load: check for ?parid=
+		  window.addEventListener('DOMContentLoaded', async () => {
+			const params = new URLSearchParams(location.search);
+			const parid = params.get('parid');
+			if (!parid) return;
+
+			showLoading();
+			try {
+			  await ensureLookups();
+			  document.getElementById('parid').value = parid;
+			  updateDiagCsvHeader(parid); 
+			  currentParid = parid;
+			  await checkYearDataAvailability(parid);
+			  await lookupAllYears({ parid });
+			  document.getElementById('input-form').style.display = 'none';
+			  document.getElementById('action-buttons').classList.remove('d-none');
+			} finally {
+			  hideLoading();
+			}
+		  });
+
+  function resetForm() {
+    document.getElementById('input-form').style.display = 'block';
+    document.getElementById('summary').innerHTML = '';
+    document.getElementById('results').innerHTML = '';
+    document.getElementById('year-nav').innerHTML = '';
+    document.getElementById('action-buttons').classList.add('d-none');
+  }
+</script>
+</body>
+</html>
