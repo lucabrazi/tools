@@ -1,0 +1,7 @@
+// Public token for read-only datasets. Safe to embed.
+const CONFIG = {
+  APP_TOKEN: "fbbsJ6S1wwtWafNbQAEpKqMTX",
+};
+
+// Export the configuration
+export default CONFIG;

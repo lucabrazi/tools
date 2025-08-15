@@ -1,0 +1,69 @@
+body {
+  font-family: sans-serif;
+  padding: 20px;
+  max-width: 900px;
+  margin: auto;
+}
+label {
+  display: block;
+  margin-top: 12px;
+}
+input, select, button {
+  width: 100%;
+  max-width: 250px;
+  padding: 6px;
+  margin-top: 5px;
+  font-size: 16px;
+}
+button.download {
+  max-width: none;
+  margin-top: 10px;
+}
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 25px;
+  word-break: break-word;
+}
+th, td {
+  border: 1px solid #ccc;
+  padding: 8px;
+  text-align: left;
+}
+th {
+  background-color: #f2f2f2;
+}
+#summary {
+  margin-top: 20px;
+  font-weight: bold;
+}
+#year-nav {
+  margin-top: 20px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+#loadingOverlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  background: rgba(255, 255, 255, 0.8);
+  z-index: 9999;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  font-size: 1.25rem;
+}
+@media (max-width: 600px) {
+  input, select, button {
+    width: 100%;
+  }
+}
+@media print {
+  .d-print-none {
+    display: none !important;
+  }
+}
