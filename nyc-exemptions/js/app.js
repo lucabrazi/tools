@@ -375,16 +375,16 @@ function renderData(data, year) {
       let val = row[f] || '';
 
       if (f === 'exmp_code') {
-        const code = String(row[f] || '');
-        const desc = exemptionLookup[code];
-        val = code;
-        if (desc) val += ` – ${desc}`;
+       const code = String(row[f] || '');
+       const desc = exemptionLookup[code];
+       const combined = desc ? `${code} – ${desc}` : code;
+       return `<td data-label="${headers[i]}">${combined}</td>`;
       }
 
       if (f === 'period') {
         const disp = val === '1' ? '1 – Tentative' : val === '3' ? '3 – Final' : val;
         const color = val === '1' ? 'orange' : val === '3' ? 'green' : 'inherit';
-        return `<td style="color:${color}; font-weight:bold">${disp}</td>`;
+        return `<td data-label="${headers[i]}" style="color:${color}; font-weight:bold">${disp}</td>`;
       }
 
       return `<td data-label="${headers[i]}">${val}</td>`;
