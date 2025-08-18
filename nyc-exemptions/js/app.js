@@ -384,7 +384,7 @@ function renderData(data, year) {
       if (f === 'period') {
         const disp = val === '1' ? '1 – Tentative' : val === '3' ? '3 – Final' : val;
         const color = val === '1' ? 'orange' : val === '3' ? 'green' : 'inherit';
-        return `<td data-label="${headers[i]}" style="color:${color}; font-weight:bold">${disp}</td>`;
+        return `<td data-label="${headers[i]}"><span style="color:${color}; font-weight:bold">${disp}</span></td>`;
       }
 
       return `<td data-label="${headers[i]}">${val}</td>`;
