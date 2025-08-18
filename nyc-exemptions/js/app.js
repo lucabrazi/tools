@@ -368,10 +368,10 @@ function renderData(data, year) {
   const headers = ['Tax Year', 'Period', 'Base Year', 'Benefit Start', '# Of Years', 'Exemption Type'];
 
   const headerCells = headers.map(h => `<th>${h}</th>`).join('');
-  let html = `<table><thead><tr>${headerCells}</tr></thead><tbody>`;
+  let html = `<div class="table-responsive"><table class="table table-sm" id="resultsTable"><thead><tr>${headerCells}</tr></thead><tbody>`;
 
   data.forEach(row => {
-    html += '<tr>' + fields.map(f => {
+    html += '<tr>' + fields.map((f,i) => {
       let val = row[f] || '';
 
       if (f === 'exmp_code') {
@@ -387,11 +387,11 @@ function renderData(data, year) {
         return `<td style="color:${color}; font-weight:bold">${disp}</td>`;
       }
 
-      return `<td>${val}</td>`;
+      return `<td data-label="${headers[i]}">${val}</td>`;
     }).join('') + '</tr>';
   });
 
-  html += '</tbody></table>';
+  html += '</tbody></table></div>';
   $('results').innerHTML = html;
 
   // Copy link

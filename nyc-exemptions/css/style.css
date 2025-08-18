@@ -67,3 +67,46 @@ th {
     display: none !important;
   }
 }
+
+/* --- Responsive table tweaks --- */
+#results .table td, #results .table th {
+  word-break: break-word;
+  vertical-align: top;
+}
+#results .table thead th {
+  white-space: nowrap;
+}
+
+/* Optional: stack table rows on very small screens */
+@media (max-width: 576px) {
+  #results .table thead {
+    display: none;
+  }
+  #results .table, 
+  #results .table tbody, 
+  #results .table tr, 
+  #results .table td {
+    display: block;
+    width: 100%;
+  }
+  #results .table tr {
+    margin-bottom: 0.75rem;
+    border: 1px solid #e9ecef;
+    border-radius: 0.5rem;
+    padding: 0.5rem;
+  }
+  #results .table td {
+    padding-left: 45%;
+    position: relative;
+    min-height: 2rem;
+  }
+  #results .table td::before {
+    content: attr(data-label);
+    position: absolute;
+    left: 0.75rem;
+    top: 0.5rem;
+    width: 40%;
+    font-weight: 600;
+    white-space: normal;
+  }
+}
