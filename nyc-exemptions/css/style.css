@@ -103,6 +103,7 @@ th {
     border: none;
     background: #eee;
   }
+
   #results .table td::before {
     content: attr(data-label);
     position: absolute;
@@ -112,4 +113,10 @@ th {
     font-weight: 600;
     white-space: normal;
   }
+
+  #results .table td[data-label="Period"] {
+    color: inherit !important;
+    font-weight: normal !important;
+  }
+
 }
